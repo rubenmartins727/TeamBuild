@@ -4,19 +4,23 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
-import { Badge } from '@/components/ui/badge';
-import { Separator } from '@/components/ui/separator';
 import { toast } from 'sonner';
 import { Plus, Users, Trophy, Share, Trash2, ChevronRight } from 'lucide-react';
 import { motion } from 'framer-motion';
+
+// 🔥 Firestore
+import { db } from './firebase'; // porque firebase.ts está em /app
+import { doc, onSnapshot, setDoc } from 'firebase/firestore';
 
 type Player = { id: string; name: string };
 type Team = Player[];
 type Split = { teamA: Team; teamB: Team };
 type Submission = { id: string; author: string; split: Split; createdAt: number };
 
-// ----------------- utils
 const uid = () => Math.random().toString(36).slice(2, 10);
+const makeEmptyPlayers = (): Player[] =>
+  Array.from({ length: 10 }, () => ({ id: uid(), name: '' }));
+
 const canonicalSplitKey = (split: Split) => {
   const a = [...split.teamA.map(p => p.name)].sort();
   const b = [...split.teamB.map(p => p.name)].sort();
@@ -29,61 +33,16 @@ const namesToSplit = (namesA: string[], allPlayers: Player[]): Split => {
   const teamB = allPlayers.filter(p => !setA.has(p.name));
   return { teamA, teamB };
 };
-const useLocalState = <T,>(key: string, initial: T) => {
-  const [state, setState] = useState<T>(() => {
-    try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) as T : initial; } catch { return initial; }
-  });
-  useEffect(() => { try { localStorage.setItem(key, JSON.stringify(state)); } catch {} }, [key, state]);
-  return [state, setState] as const;
-};
 
-// ----------------- estado por dia (players + submissions)
-type DayState = { players: Player[]; submissions: Submission[] };
-
-const makeEmptyPlayers = () =>
-  Array.from({ length: 10 }, () => ({ id: uid(), name: '' }));
-
-const emptyDay = (): DayState => ({ players: makeEmptyPlayers(), submissions: [] });
-
-const dayKey = (date: string) => `fut5/day/${date}`;
-
-const loadDay = (date: string): DayState => {
-  try {
-    const raw = localStorage.getItem(dayKey(date));
-    if (raw) {
-      const parsed = JSON.parse(raw) as DayState;
-      const fixedPlayers =
-        parsed.players.length === 10
-          ? parsed.players
-          : Array.from({ length: 10 }, (_, i) => parsed.players[i] ?? { id: uid(), name: '' });
-      return { players: fixedPlayers, submissions: parsed.submissions ?? [] };
-    }
-  } catch {}
-  return emptyDay();
-};
-
-const saveDay = (date: string, state: DayState) => {
-  try { localStorage.setItem(dayKey(date), JSON.stringify(state)); } catch {}
-};
-
-// ----------------- UI
-const Jersey: React.FC<{
-  label: string;
-  selected?: boolean;
-  onClick?: () => void;
-}> = ({ label, selected, onClick }) => (
+const Jersey: React.FC<{ label: string; selected?: boolean; onClick?: () => void }> = ({ label, selected, onClick }) => (
   <motion.div
     whileHover={{ scale: 1.03 }}
     whileTap={{ scale: 0.98 }}
-    className={`relative inline-flex h-12 w-10 cursor-pointer items-center justify-center rounded-b-2xl border p-1 shadow-sm ${
-      selected ? 'bg-emerald-500 text-white' : 'bg-white'
-    }`}
+    className={`relative inline-flex h-12 w-10 cursor-pointer items-center justify-center rounded-b-2xl border p-1 shadow-sm ${selected ? 'bg-emerald-500 text-white' : 'bg-white'}`}
     onClick={onClick}
   >
     <div className="absolute -top-2 left-1/2 h-3 w-8 -translate-x-1/2 rounded-md border bg-inherit" />
-    <span className="text-xs font-semibold text-center leading-tight z-10 px-1">
-      {label}
-    </span>
+    <span className="text-xs font-semibold text-center leading-tight z-10 px-1">{label}</span>
   </motion.div>
 );
 
@@ -116,42 +75,54 @@ const Pitch: React.FC<{ title: string; teamLeft: Team; teamRight: Team }> = ({ t
 };
 
 export default function Page() {
-  // data selecionada e autor mantêm-se globais
-  const [date, setDate] = useLocalState<string>('fut5/date', new Date().toISOString().slice(0, 10));
-  const [author, setAuthor] = useLocalState<string>('fut5/author', '');
+  // A data separa os jogos (cada data é um doc em /games/default/days/{date})
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
 
-  // estado do dia atual
-  const [dayState, setDayState] = useState<DayState>(() =>
-    (typeof window !== 'undefined' ? loadDay(date) : emptyDay())
-  );
+  // Estado que vem do Firestore (partilhado por todos em tempo real)
+  const [players, setPlayers] = useState<Player[]>(makeEmptyPlayers());
+  const [submissions, setSubmissions] = useState<Submission[]>([]);
+  const [author, setAuthor] = useState('');
   const [selectedA, setSelectedA] = useState<Set<string>>(new Set());
 
-  // garante 10 players e persiste sempre que mudar
+  // Listener realtime do documento do dia
   useEffect(() => {
-    if (dayState.players.length !== 10) {
-      setDayState(s => ({
-        ...s,
-        players: Array.from({ length: 10 }, (_, i) => s.players[i] ?? { id: uid(), name: '' })
-      }));
-    }
-  }, [dayState.players]);
+    const ref = doc(db, 'games', 'default', 'days', date);
+    const unsub = onSnapshot(ref, async (snap) => {
+      if (!snap.exists()) {
+        // cria o doc do dia com estrutura base
+        await setDoc(ref, { players: makeEmptyPlayers(), submissions: [] });
+        return;
+      }
+      const data = snap.data() as { players?: Player[]; submissions?: Submission[] };
+      setPlayers(() => {
+        const arr = (data.players ?? makeEmptyPlayers());
+        // garantir 10 registos sempre
+        return Array.from({ length: 10 }, (_, i) => arr[i] ?? { id: uid(), name: '' });
+      });
+      setSubmissions(data.submissions ?? []);
+    });
+    setSelectedA(new Set()); // limpa seleções quando trocas de dia
+    return () => unsub();
+  }, [date]);
 
-  useEffect(() => { saveDay(date, dayState); }, [date, dayState]);
-
-  // quando muda a data: carrega estado dessa data e limpa seleção temporária
-  const onDateChange = (newDate: string) => {
-    setDate(newDate);
-    setDayState(loadDay(newDate));
-    setSelectedA(new Set());
-  };
-
-  const namedPlayers = useMemo(
-    () => dayState.players.filter(p => p.name.trim() !== ''),
-    [dayState.players]
-  );
+  const namedPlayers = useMemo(() => players.filter(p => p.name.trim() !== ''), [players]);
   const readyForSubmissions =
     namedPlayers.length === 10 &&
     new Set(namedPlayers.map(p => p.name.trim().toLowerCase())).size === 10;
+
+  const shareText = useMemo(() => {
+    const n = namedPlayers.map(p => p.name).join(', ');
+    return `Fut5 ${date}: ${n}`;
+  }, [namedPlayers, date]);
+
+  const updatePlayersRemote = async (next: Player[]) => {
+    const ref = doc(db, 'games', 'default', 'days', date);
+    await setDoc(ref, { players: next }, { merge: true });
+  };
+  const updateSubmissionsRemote = async (next: Submission[]) => {
+    const ref = doc(db, 'games', 'default', 'days', date);
+    await setDoc(ref, { submissions: next }, { merge: true });
+  };
 
   const toggleSelect = (name: string) => {
     setSelectedA(prev => {
@@ -165,66 +136,47 @@ export default function Page() {
     });
   };
 
-  const clearAll = () => {
-    setDayState(emptyDay());
-    setSelectedA(new Set());
-  };
-
-  const handleSavePlayers = () => {
+  const handleSavePlayers = async () => {
     if (!readyForSubmissions) { toast.error('Insere 10 nomes únicos.'); return; }
+    await updatePlayersRemote(players);
     toast.success('Jogadores guardados!');
   };
 
-  const handleSubmitSplit = () => {
+  const handleSubmitSplit = async () => {
     if (!readyForSubmissions) return toast.error('Define primeiro os 10 jogadores.');
     if (selectedA.size !== 5) return toast.error('Escolhe exatamente 5 camisolas para a Equipa A.');
-    const a = Array.from(selectedA);
-    const split = namesToSplit(a, namedPlayers);
+
+    const split = namesToSplit(Array.from(selectedA), namedPlayers);
     const sub: Submission = { id: uid(), author: author || 'Anónimo', split, createdAt: Date.now() };
 
-    const recentSame = dayState.submissions.find(s =>
-      s.author === sub.author &&
-      canonicalSplitKey(s.split) === canonicalSplitKey(sub.split) &&
-      Date.now() - s.createdAt < 60000
-    );
-    if (recentSame) return toast.message('Já submeteste esta formação há pouco.');
-
-    setDayState(s => ({ ...s, submissions: [sub, ...s.submissions] }));
+    const next = [sub, ...submissions];
+    await updateSubmissionsRemote(next);
     setSelectedA(new Set());
-    toast.success('Formação submetida! Obrigado.');
+    toast.success('Formação submetida!');
   };
 
   const consensus = useMemo(() => {
-    if (dayState.submissions.length === 0) return null;
-    const counts = new Map<string, { key: string; split: Split; votes: number }>();
-    for (const s of dayState.submissions) {
+    if (submissions.length === 0) return null;
+    const counts = new Map<string, { split: Split; votes: number }>();
+    for (const s of submissions) {
       const k = canonicalSplitKey(s.split);
-      const entry = counts.get(k) ?? { key: k, split: s.split, votes: 0 };
+      const entry = counts.get(k) ?? { split: s.split, votes: 0 };
       entry.votes += 1; counts.set(k, entry);
     }
     const top = [...counts.values()].sort((a, b) => b.votes - a.votes)[0];
-    const aNames = top.split.teamA.map(p => p.name).sort();
-    const bNames = top.split.teamB.map(p => p.name).sort();
-    const [left, right] = [aNames, bNames].sort((x, y) => x[0].localeCompare(y[0]));
-    const toTeam = (names: string[]): Team => names.map(n => namedPlayers.find(p => p.name === n)!).filter(Boolean);
-    return { split: { teamA: toTeam(left), teamB: toTeam(right) }, votes: top.votes };
-  }, [dayState.submissions, namedPlayers]);
-
-  const shareText = useMemo(() => {
-    const n = namedPlayers.map(p => p.name).join(', ');
-    return `Fut5 ${date}: ${n}`;
-  }, [namedPlayers, date]);
+    return top;
+  }, [submissions]);
 
   return (
     <div className='container'>
       <header className='mb-6 flex flex-col gap-3 md:flex-row md:items-center md:justify-between'>
         <div>
           <h1 className='text-2xl md:text-3xl font-bold tracking-tight'>Fut5 — Gestor de Equipas 5×5</h1>
-          <p className='text-sm text-neutral-500'>Cria a lista de 10, cada um propõe as equipas, e vemos o consenso.</p>
+          <p className='text-sm text-neutral-500'>Dados partilhados em tempo real por data.</p>
         </div>
         <div className='flex items-center gap-2'>
-          <Input type='date' value={date} onChange={(e) => onDateChange(e.target.value)} />
-          <Button variant='outline' onClick={() => { navigator.clipboard.writeText(shareText); toast.success('Texto copiado para partilhar os nomes.'); }}>
+          <Input type='date' value={date} onChange={(e) => setDate(e.target.value)} />
+          <Button variant='outline' onClick={() => { navigator.clipboard.writeText(shareText); toast.success('Texto copiado.'); }}>
             <Share className='mr-2 h-4 w-4'/>Partilhar
           </Button>
         </div>
@@ -233,27 +185,27 @@ export default function Page() {
       <Tabs defaultValue='jogadores' className='w-full'>
         <TabsList>
           <TabsTrigger value='jogadores'><Users className='mr-2 h-4 w-4'/>Jogadores</TabsTrigger>
-          <TabsTrigger value='submeter'><Plus className='mr-2 h-4 w-4'/>Submeter Equipas</TabsTrigger>
+          <TabsTrigger value='submeter'><Plus className='mr-2 h-4 w-4'/>Submeter</TabsTrigger>
           <TabsTrigger value='resultado'><Trophy className='mr-2 h-4 w-4'/>Resultado</TabsTrigger>
         </TabsList>
 
+        {/* JOGADORES */}
         <TabsContent valueFor='jogadores'>
           <Card>
-            <CardHeader><CardTitle>1) Insere os 10 jogadores do dia</CardTitle></CardHeader>
+            <CardHeader><CardTitle>Insere os 10 jogadores</CardTitle></CardHeader>
             <CardContent className='space-y-4'>
               <div className='grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3'>
-                {dayState.players.map((p, i) => (
+                {players.map((p, i) => (
                   <div key={p.id} className='flex items-center gap-2'>
                     <span className='badge w-7 justify-center text-center'>{i + 1}</span>
                     <Input
                       placeholder={`Jogador ${i + 1}`}
                       value={p.name}
-                      onChange={(e) => {
+                      onChange={async (e) => {
                         const name = e.target.value;
-                        setDayState(s => ({
-                          ...s,
-                          players: s.players.map(pp => pp.id === p.id ? { ...pp, name } : pp)
-                        }));
+                        const next = players.map(pp => pp.id === p.id ? { ...pp, name } : pp);
+                        setPlayers(next);               // update otimista
+                        await updatePlayersRemote(next); // sincroniza
                       }}
                     />
                   </div>
@@ -262,7 +214,15 @@ export default function Page() {
               <div className='flex items-center justify-between'>
                 <div className='text-sm text-neutral-500'>Precisas de 10 nomes únicos.</div>
                 <div className='flex gap-2'>
-                  <Button variant='outline' onClick={clearAll}><Trash2 className='mr-2 h-4 w-4'/>Limpar</Button>
+                  <Button variant='outline' onClick={async () => {
+                    const next = makeEmptyPlayers();
+                    setPlayers(next);
+                    setSubmissions([]);
+                    setSelectedA(new Set());
+                    await setDoc(doc(db, 'games', 'default', 'days', date), { players: next, submissions: [] }, { merge: true });
+                  }}>
+                    <Trash2 className='mr-2 h-4 w-4'/>Limpar
+                  </Button>
                   <Button onClick={handleSavePlayers}>Guardar</Button>
                 </div>
               </div>
@@ -270,9 +230,10 @@ export default function Page() {
           </Card>
         </TabsContent>
 
+        {/* SUBMETER */}
         <TabsContent valueFor='submeter'>
           <Card>
-            <CardHeader><CardTitle>2) Escolhe a tua formação</CardTitle></CardHeader>
+            <CardHeader><CardTitle>Escolhe a tua formação</CardTitle></CardHeader>
             <CardContent className='space-y-4'>
               <div className='grid gap-3 md:grid-cols-[1fr_auto_1fr] items-start'>
                 <div>
@@ -306,8 +267,6 @@ export default function Page() {
                 </div>
               </div>
 
-              <div className='separator' />
-
               <div className='grid gap-3 md:grid-cols-3 md:items-end'>
                 <div className='md:col-span-2'>
                   <label className='mb-1 block text-sm'>O teu nome (para a submissão)</label>
@@ -316,18 +275,25 @@ export default function Page() {
                 <Button className='w-full' onClick={handleSubmitSplit}>Submeter</Button>
               </div>
 
-              {dayState.submissions.length > 0 && (
+              {submissions.length > 0 && (
                 <div className='mt-4'>
-                  <div className='mb-2 text-sm text-neutral-500'>Submissões ({dayState.submissions.length})</div>
+                  <div className='mb-2 text-sm text-neutral-500'>Submissões ({submissions.length})</div>
                   <div className='grid gap-2'>
-                    {dayState.submissions.map(s => (
+                    {submissions.map(s => (
                       <div key={s.id} className='flex items-center justify-between rounded-md border p-2 text-sm'>
                         <div className='flex flex-wrap items-center gap-2'>
                           <span className='badge'>{new Date(s.createdAt).toLocaleTimeString()}</span>
                           <span className='font-medium'>{s.author}</span>
                           <span className='text-neutral-500'>→ A: {s.split.teamA.map(p => p.name).join(', ')}</span>
                         </div>
-                        <Button variant='ghost' onClick={() => setDayState(d => ({ ...d, submissions: d.submissions.filter(x => x.id !== s.id) }))}>
+                        <Button
+                          variant='ghost'
+                          onClick={async () => {
+                            const next = submissions.filter(x => x.id !== s.id);
+                            setSubmissions(next);
+                            await updateSubmissionsRemote(next);
+                          }}
+                        >
                           <Trash2 className='h-4 w-4'/>
                         </Button>
                       </div>
@@ -339,14 +305,15 @@ export default function Page() {
           </Card>
         </TabsContent>
 
+        {/* RESULTADO */}
         <TabsContent valueFor='resultado'>
           {consensus ? (
             <div className='space-y-4'>
-              <Pitch title={`3) Consenso — ${consensus.votes} voto(s)`} teamLeft={consensus.split.teamA} teamRight={consensus.split.teamB} />
+              <Pitch title={`Consenso — ${consensus.votes} voto(s)`} teamLeft={consensus.split.teamA} teamRight={consensus.split.teamB} />
             </div>
           ) : (
             <Card>
-              <CardHeader><CardTitle>3) Resultado</CardTitle></CardHeader>
+              <CardHeader><CardTitle>Resultado</CardTitle></CardHeader>
               <CardContent className='text-sm text-neutral-500'>Ainda não há submissões suficientes. Vai ao separador "Submeter".</CardContent>
             </Card>
           )}
@@ -354,7 +321,7 @@ export default function Page() {
       </Tabs>
 
       <footer className='mt-8 text-center text-xs text-neutral-500'>
-        <p>💡 Próximos passos: login/rooms, votação por posição, exportação para imagem, partilha por link.</p>
+        <p>💡 Dados sincronizados em /games/default/days/{'{date}'} (Firestore).</p>
       </footer>
     </div>
   );
