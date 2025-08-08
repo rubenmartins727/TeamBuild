@@ -14,9 +14,8 @@ type Player = { id: string; name: string };
 type Team = Player[];
 type Split = { teamA: Team; teamB: Team };
 type Submission = { id: string; author: string; split: Split; createdAt: number };
-type MotionDivProps = React.ComponentProps<typeof motion.div>;
 
-
+// ----------------- utils
 const uid = () => Math.random().toString(36).slice(2, 10);
 const canonicalSplitKey = (split: Split) => {
   const a = [...split.teamA.map(p => p.name)].sort();
@@ -38,6 +37,36 @@ const useLocalState = <T,>(key: string, initial: T) => {
   return [state, setState] as const;
 };
 
+// ----------------- estado por dia (players + submissions)
+type DayState = { players: Player[]; submissions: Submission[] };
+
+const makeEmptyPlayers = () =>
+  Array.from({ length: 10 }, () => ({ id: uid(), name: '' }));
+
+const emptyDay = (): DayState => ({ players: makeEmptyPlayers(), submissions: [] });
+
+const dayKey = (date: string) => `fut5/day/${date}`;
+
+const loadDay = (date: string): DayState => {
+  try {
+    const raw = localStorage.getItem(dayKey(date));
+    if (raw) {
+      const parsed = JSON.parse(raw) as DayState;
+      const fixedPlayers =
+        parsed.players.length === 10
+          ? parsed.players
+          : Array.from({ length: 10 }, (_, i) => parsed.players[i] ?? { id: uid(), name: '' });
+      return { players: fixedPlayers, submissions: parsed.submissions ?? [] };
+    }
+  } catch {}
+  return emptyDay();
+};
+
+const saveDay = (date: string, state: DayState) => {
+  try { localStorage.setItem(dayKey(date), JSON.stringify(state)); } catch {}
+};
+
+// ----------------- UI
 const Jersey: React.FC<{
   label: string;
   selected?: boolean;
@@ -87,18 +116,42 @@ const Pitch: React.FC<{ title: string; teamLeft: Team; teamRight: Team }> = ({ t
 };
 
 export default function Page() {
+  // data selecionada e autor mantêm-se globais
   const [date, setDate] = useLocalState<string>('fut5/date', new Date().toISOString().slice(0, 10));
-  const [players, setPlayers] = useLocalState<Player[]>('fut5/players', Array.from({ length: 10 }, (_, i) => ({ id: uid(), name: '' })));
   const [author, setAuthor] = useLocalState<string>('fut5/author', '');
-  const [submissions, setSubmissions] = useLocalState<Submission[]>('fut5/submissions', []);
+
+  // estado do dia atual
+  const [dayState, setDayState] = useState<DayState>(() =>
+    (typeof window !== 'undefined' ? loadDay(date) : emptyDay())
+  );
   const [selectedA, setSelectedA] = useState<Set<string>>(new Set());
 
+  // garante 10 players e persiste sempre que mudar
   useEffect(() => {
-    if (players.length !== 10) setPlayers(Array.from({ length: 10 }, (_, i) => players[i] ?? { id: uid(), name: '' }));
-  }, [players, setPlayers]);
+    if (dayState.players.length !== 10) {
+      setDayState(s => ({
+        ...s,
+        players: Array.from({ length: 10 }, (_, i) => s.players[i] ?? { id: uid(), name: '' })
+      }));
+    }
+  }, [dayState.players]);
 
-  const namedPlayers = useMemo(() => players.filter(p => p.name.trim() !== ''), [players]);
-  const readyForSubmissions = namedPlayers.length === 10 && new Set(namedPlayers.map(p => p.name.trim().toLowerCase())).size === 10;
+  useEffect(() => { saveDay(date, dayState); }, [date, dayState]);
+
+  // quando muda a data: carrega estado dessa data e limpa seleção temporária
+  const onDateChange = (newDate: string) => {
+    setDate(newDate);
+    setDayState(loadDay(newDate));
+    setSelectedA(new Set());
+  };
+
+  const namedPlayers = useMemo(
+    () => dayState.players.filter(p => p.name.trim() !== ''),
+    [dayState.players]
+  );
+  const readyForSubmissions =
+    namedPlayers.length === 10 &&
+    new Set(namedPlayers.map(p => p.name.trim().toLowerCase())).size === 10;
 
   const toggleSelect = (name: string) => {
     setSelectedA(prev => {
@@ -113,8 +166,7 @@ export default function Page() {
   };
 
   const clearAll = () => {
-    setPlayers(Array.from({ length: 10 }, () => ({ id: uid(), name: '' })));
-    setSubmissions([]);
+    setDayState(emptyDay());
     setSelectedA(new Set());
   };
 
@@ -129,17 +181,23 @@ export default function Page() {
     const a = Array.from(selectedA);
     const split = namesToSplit(a, namedPlayers);
     const sub: Submission = { id: uid(), author: author || 'Anónimo', split, createdAt: Date.now() };
-    const recentSame = submissions.find(s => s.author === sub.author && canonicalSplitKey(s.split) === canonicalSplitKey(sub.split) && Date.now() - s.createdAt < 60000);
+
+    const recentSame = dayState.submissions.find(s =>
+      s.author === sub.author &&
+      canonicalSplitKey(s.split) === canonicalSplitKey(sub.split) &&
+      Date.now() - s.createdAt < 60000
+    );
     if (recentSame) return toast.message('Já submeteste esta formação há pouco.');
-    setSubmissions(prev => [sub, ...prev]);
+
+    setDayState(s => ({ ...s, submissions: [sub, ...s.submissions] }));
     setSelectedA(new Set());
     toast.success('Formação submetida! Obrigado.');
   };
 
   const consensus = useMemo(() => {
-    if (submissions.length === 0) return null;
+    if (dayState.submissions.length === 0) return null;
     const counts = new Map<string, { key: string; split: Split; votes: number }>();
-    for (const s of submissions) {
+    for (const s of dayState.submissions) {
       const k = canonicalSplitKey(s.split);
       const entry = counts.get(k) ?? { key: k, split: s.split, votes: 0 };
       entry.votes += 1; counts.set(k, entry);
@@ -150,7 +208,7 @@ export default function Page() {
     const [left, right] = [aNames, bNames].sort((x, y) => x[0].localeCompare(y[0]));
     const toTeam = (names: string[]): Team => names.map(n => namedPlayers.find(p => p.name === n)!).filter(Boolean);
     return { split: { teamA: toTeam(left), teamB: toTeam(right) }, votes: top.votes };
-  }, [submissions, namedPlayers]);
+  }, [dayState.submissions, namedPlayers]);
 
   const shareText = useMemo(() => {
     const n = namedPlayers.map(p => p.name).join(', ');
@@ -165,8 +223,10 @@ export default function Page() {
           <p className='text-sm text-neutral-500'>Cria a lista de 10, cada um propõe as equipas, e vemos o consenso.</p>
         </div>
         <div className='flex items-center gap-2'>
-          <Input type='date' value={date} onChange={(e) => setDate(e.target.value)} />
-          <Button variant='outline' onClick={() => { navigator.clipboard.writeText(shareText); toast.success('Texto copiado para partilhar os nomes.'); }}><Share className='mr-2 h-4 w-4'/>Partilhar</Button>
+          <Input type='date' value={date} onChange={(e) => onDateChange(e.target.value)} />
+          <Button variant='outline' onClick={() => { navigator.clipboard.writeText(shareText); toast.success('Texto copiado para partilhar os nomes.'); }}>
+            <Share className='mr-2 h-4 w-4'/>Partilhar
+          </Button>
         </div>
       </header>
 
@@ -182,11 +242,20 @@ export default function Page() {
             <CardHeader><CardTitle>1) Insere os 10 jogadores do dia</CardTitle></CardHeader>
             <CardContent className='space-y-4'>
               <div className='grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3'>
-                {players.map((p, i) => (
+                {dayState.players.map((p, i) => (
                   <div key={p.id} className='flex items-center gap-2'>
                     <span className='badge w-7 justify-center text-center'>{i + 1}</span>
-                    <Input placeholder={`Jogador ${i + 1}`} value={p.name}
-                      onChange={(e) => { const name = e.target.value; setPlayers(prev => prev.map(pp => pp.id === p.id ? { ...pp, name } : pp)); }}/>
+                    <Input
+                      placeholder={`Jogador ${i + 1}`}
+                      value={p.name}
+                      onChange={(e) => {
+                        const name = e.target.value;
+                        setDayState(s => ({
+                          ...s,
+                          players: s.players.map(pp => pp.id === p.id ? { ...pp, name } : pp)
+                        }));
+                      }}
+                    />
                   </div>
                 ))}
               </div>
@@ -247,18 +316,20 @@ export default function Page() {
                 <Button className='w-full' onClick={handleSubmitSplit}>Submeter</Button>
               </div>
 
-              {submissions.length > 0 && (
+              {dayState.submissions.length > 0 && (
                 <div className='mt-4'>
-                  <div className='mb-2 text-sm text-neutral-500'>Submissões ({submissions.length})</div>
+                  <div className='mb-2 text-sm text-neutral-500'>Submissões ({dayState.submissions.length})</div>
                   <div className='grid gap-2'>
-                    {submissions.map(s => (
+                    {dayState.submissions.map(s => (
                       <div key={s.id} className='flex items-center justify-between rounded-md border p-2 text-sm'>
                         <div className='flex flex-wrap items-center gap-2'>
                           <span className='badge'>{new Date(s.createdAt).toLocaleTimeString()}</span>
                           <span className='font-medium'>{s.author}</span>
                           <span className='text-neutral-500'>→ A: {s.split.teamA.map(p => p.name).join(', ')}</span>
                         </div>
-                        <Button variant='ghost' onClick={() => setSubmissions(prev => prev.filter(x => x.id !== s.id))}><Trash2 className='h-4 w-4'/></Button>
+                        <Button variant='ghost' onClick={() => setDayState(d => ({ ...d, submissions: d.submissions.filter(x => x.id !== s.id) }))}>
+                          <Trash2 className='h-4 w-4'/>
+                        </Button>
                       </div>
                     ))}
                   </div>
@@ -269,34 +340,16 @@ export default function Page() {
         </TabsContent>
 
         <TabsContent valueFor='resultado'>
-          {(() => {
-            const consensus = ((): any => {
-              if (submissions.length === 0) return null;
-              const counts = new Map<string, { key: string; split: Split; votes: number }>();
-              for (const s of submissions) {
-                const k = canonicalSplitKey(s.split);
-                const entry = counts.get(k) ?? { key: k, split: s.split, votes: 0 };
-                entry.votes += 1; counts.set(k, entry);
-              }
-              const top = [...counts.values()].sort((a, b) => b.votes - a.votes)[0];
-              const aNames = top.split.teamA.map(p => p.name).sort();
-              const bNames = top.split.teamB.map(p => p.name).sort();
-              const [left, right] = [aNames, bNames].sort((x, y) => x[0].localeCompare(y[0]));
-              const toTeam = (names: string[]): Team => names.map(n => namedPlayers.find(p => p.name === n)!).filter(Boolean);
-              return { split: { teamA: toTeam(left), teamB: toTeam(right) }, votes: top.votes };
-            })();
-
-            return consensus ? (
-              <div className='space-y-4'>
-                <Pitch title={`3) Consenso — ${consensus.votes} voto(s)`} teamLeft={consensus.split.teamA} teamRight={consensus.split.teamB} />
-              </div>
-            ) : (
-              <Card>
-                <CardHeader><CardTitle>3) Resultado</CardTitle></CardHeader>
-                <CardContent className='text-sm text-neutral-500'>Ainda não há submissões suficientes. Vai ao separador "Submeter".</CardContent>
-              </Card>
-            );
-          })()}
+          {consensus ? (
+            <div className='space-y-4'>
+              <Pitch title={`3) Consenso — ${consensus.votes} voto(s)`} teamLeft={consensus.split.teamA} teamRight={consensus.split.teamB} />
+            </div>
+          ) : (
+            <Card>
+              <CardHeader><CardTitle>3) Resultado</CardTitle></CardHeader>
+              <CardContent className='text-sm text-neutral-500'>Ainda não há submissões suficientes. Vai ao separador "Submeter".</CardContent>
+            </Card>
+          )}
         </TabsContent>
       </Tabs>
 
