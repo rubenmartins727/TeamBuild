@@ -9,7 +9,7 @@ import { Plus, Users, Trophy, Share, Trash2, ChevronRight } from 'lucide-react';
 import { motion } from 'framer-motion';
 
 // 🔥 Firestore
-import { db } from './firebase'; // porque firebase.ts está em /app
+import { db } from './firebase'; // o teu firebase.ts está em /app
 import { doc, onSnapshot, setDoc } from 'firebase/firestore';
 
 type Player = { id: string; name: string };
@@ -78,7 +78,7 @@ export default function Page() {
   // A data separa os jogos (cada data é um doc em /games/default/days/{date})
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
 
-  // Estado que vem do Firestore (partilhado por todos em tempo real)
+  // Estado partilhado (vem do Firestore em tempo real)
   const [players, setPlayers] = useState<Player[]>(makeEmptyPlayers());
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [author, setAuthor] = useState('');
@@ -89,19 +89,18 @@ export default function Page() {
     const ref = doc(db, 'games', 'default', 'days', date);
     const unsub = onSnapshot(ref, async (snap) => {
       if (!snap.exists()) {
-        // cria o doc do dia com estrutura base
+        // cria o doc do dia com estrutura base (reset para novas datas)
         await setDoc(ref, { players: makeEmptyPlayers(), submissions: [] });
         return;
       }
       const data = snap.data() as { players?: Player[]; submissions?: Submission[] };
       setPlayers(() => {
-        const arr = (data.players ?? makeEmptyPlayers());
-        // garantir 10 registos sempre
+        const arr = data.players ?? makeEmptyPlayers();
         return Array.from({ length: 10 }, (_, i) => arr[i] ?? { id: uid(), name: '' });
       });
       setSubmissions(data.submissions ?? []);
     });
-    setSelectedA(new Set()); // limpa seleções quando trocas de dia
+    setSelectedA(new Set()); // limpa seleção temporária ao trocar de data
     return () => unsub();
   }, [date]);
 
@@ -150,7 +149,8 @@ export default function Page() {
     const sub: Submission = { id: uid(), author: author || 'Anónimo', split, createdAt: Date.now() };
 
     const next = [sub, ...submissions];
-    await updateSubmissionsRemote(next);
+    setSubmissions(next);                // update otimista
+    await updateSubmissionsRemote(next); // sincroniza
     setSelectedA(new Set());
     toast.success('Formação submetida!');
   };
@@ -204,8 +204,8 @@ export default function Page() {
                       onChange={async (e) => {
                         const name = e.target.value;
                         const next = players.map(pp => pp.id === p.id ? { ...pp, name } : pp);
-                        setPlayers(next);               // update otimista
-                        await updatePlayersRemote(next); // sincroniza
+                        setPlayers(next);               // otimista
+                        await updatePlayersRemote(next); // sync
                       }}
                     />
                   </div>
