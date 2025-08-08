@@ -14,6 +14,8 @@ type Player = { id: string; name: string };
 type Team = Player[];
 type Split = { teamA: Team; teamB: Team };
 type Submission = { id: string; author: string; split: Split; createdAt: number };
+type MotionDivProps = React.ComponentProps<typeof motion.div>;
+
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 const canonicalSplitKey = (split: Split) => {
@@ -36,12 +38,21 @@ const useLocalState = <T,>(key: string, initial: T) => {
   return [state, setState] as const;
 };
 
-const Jersey: React.FC<{ label: string; selected?: boolean; onClick?: () => void } & React.HTMLAttributes<HTMLDivElement>> = ({ label, selected, onClick, ...rest }) => (
-  <motion.div whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.98 }}
-    className={`relative inline-flex h-12 w-10 cursor-pointer items-center justify-center rounded-b-2xl border p-1 shadow-sm ${selected ? 'bg-emerald-500 text-white' : 'bg-white'}`}
-    onClick={onClick} {...rest}>
-    <div className='absolute -top-2 left-1/2 h-3 w-8 -translate-x-1/2 rounded-md border bg-inherit' />
-    <span className='text-xs font-semibold text-center leading-tight z-10 px-1'>{label}</span>
+const Jersey: React.FC<
+  { label: string; selected?: boolean } & Omit<MotionDivProps, 'children'>
+> = ({ label, selected, ...rest }) => (
+  <motion.div
+    whileHover={{ scale: 1.03 }}
+    whileTap={{ scale: 0.98 }}
+    className={`relative inline-flex h-12 w-10 cursor-pointer items-center justify-center rounded-b-2xl border p-1 shadow-sm ${
+      selected ? 'bg-emerald-500 text-white' : 'bg-white'
+    }`}
+    {...rest}
+  >
+    <div className="absolute -top-2 left-1/2 h-3 w-8 -translate-x-1/2 rounded-md border bg-inherit" />
+    <span className="text-xs font-semibold text-center leading-tight z-10 px-1">
+      {label}
+    </span>
   </motion.div>
 );
 
